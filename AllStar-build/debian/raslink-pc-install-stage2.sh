@@ -1,17 +1,26 @@
-#!/bin/bash
-# rpi-allstar-install.sh - Automated build and patch script for AllStar Raspbian install
-#Used to update and prepare images for shipping
-# Also used for resetting AllStar to defaults in test environments
-# For developers only!
-# Do not use unless you know what you're doing,
-	# and you've made a complete backup first!
-# This script can break your node!
-# This script should only be run on development Raspberry Pis!
-# You have been warned!
+﻿#!/bin/bash
+# raslink-pc-install-stage2.sh - Complete the AllStar install on Debian
+#    Copyright (C) 2017  Jeremy Lincicome (W0JRL)
+#    https://jlappliedtechnologies.com  admin@jlappliedtechnologies.com
+
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 # Script Start
-cd /usr/src/utils
-git pull
+# Restore bashrc
+mv /root/.bashrc.orig /root/.bashrc
+# Complete install
+echo "Running RasLink-pc install, stage two."
 chmod +x /usr/src/utils/AllStar-build/common/update-dahdi.sh
 /usr/src/utils/AllStar-build/common/update-dahdi.sh
 chmod +x /usr/src/utils/AllStar-build/common/update-libpri.sh
@@ -50,10 +59,10 @@ systemctl enable asterisk.timer &>/dev/null
 systemctl enable updatenodelist.service &>/dev/null
 systemctl enable nodenames.service &>/dev/null
 systemctl disable avahi-daemon &>/dev/null
-chmod +x /usr/src/utils/AllStar-build/rpi/make-links.sh
-/usr/src/utils/AllStar-build/rpi/make-links.sh
+chmod +x /usr/src/utils/AllStar-build/debian/make-links.sh
+/usr/src/utils/AllStar-build/debian/make-links.sh
 service cron restart
-if [ "$(grep -ic "/usr/bin/version" /root/.profile) = "0" ]; then
+if [ "$(grep -ic "/usr/bin/version" /root/.profile)" == "0" ]; then
   echo "/usr/bin/version" >> /root/.profile
 fi
 echo "Done"
@@ -64,7 +73,7 @@ echo "Cleaning up object files..."
 cd /usr/src/utils/
 (git clean -f;git checkout -f)
 echo "Done"
-echo "AllStar is now installed..."
+echo "AllStar is now installed."
 echo "You can update the system at any time by running 'system-update' at a root prompt."
 echo "Please edit rpt.conf, iax.conf, extensions.conf, and usbradio.conf."
 echo "If you want to use EchoLink, edit echolink.conf."
@@ -72,6 +81,6 @@ echo "If you don't want to use EchoLink, you don't need to do anything."
 echo "EchoLink is disabled by default."
 echo "All files are located in /etc/asterisk."
 echo "After editing files, reboot to get your node online."
-echo "Enjoy AllStar on Raspbian!"
+echo "Enjoy AllStar on Debian!"
 date > /root/.lastupdate
 exit 0
