@@ -1,21 +1,21 @@
 #!/bin/bash
 # raslink-pc-install.sh - Install AllStar on Debian
-#    Copyright (C) 2017  Jeremy Lincicome (W0JRL)
+#    Copyright (C) 2020  Jeremy Lincicome (W0JRL)
 #    https://jlappliedtechnologies.com  admin@jlappliedtechnologies.com
-
+#
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
 #    the Free Software Foundation, either version 3 of the License, or
 #    (at your option) any later version.
-
+#
 #    This program is distributed in the hope that it will be useful,
 #    but WITHOUT ANY WARRANTY; without even the implied warranty of
 #    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #    GNU General Public License for more details.
-
+#
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
+#
 # Script Start
 echo "Welcome to the RasLink-pc installer."
 echo "This script will install AllStar on your Debian server."
@@ -27,7 +27,7 @@ if [[ "$install" = "y" ]] || [[ "$install" = "Y" ]]; then
   echo "downloading and unpacking source files."
   echo "This might take awhile."
   cd /usr/src
-  git clone https://github.com/w0jrl/raslink.git utils
+  git clone https://gitlab.com/w0jrl/raslink.git utils
   echo "Done"
   sleep 0.5
   echo "Updating the system..."
@@ -35,7 +35,7 @@ if [[ "$install" = "y" ]] || [[ "$install" = "Y" ]]; then
   echo "Done"
   sleep 0.5
   echo "Setting up log rotate..."
-  echo "Logs will be rotated once a month."
+  echo "Logs will be rotated once a week."
   chmod +x /usr/src/utils/AllStar-build/common/mk-logrotate-asterisk.sh
   /usr/src/utils/AllStar-build/common/mk-logrotate-asterisk.sh
   echo "Done"
@@ -54,7 +54,7 @@ if [[ "$install" = "y" ]] || [[ "$install" = "Y" ]]; then
   echo "After the system reboots, you need to log in as the root user to finish the installation."
   echo "Rebooting to finish install."
   sync
-  sudo reboot
+  reboot
   exit 0
 else
   echo "AllStar will not be installed."

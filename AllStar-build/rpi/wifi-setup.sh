@@ -1,26 +1,26 @@
 #!/bin/bash
 # wifi-setup.sh - Setup Wi-fi connections
-#    Copyright (C) 2017  Jeremy Lincicome (W0JRL)
+#    Copyright (C) 2020  Jeremy Lincicome (W0JRL)
 #    https://jlappliedtechnologies.com  admin@jlappliedtechnologies.com
-#    Wi-fi card selection and loop scan contributed by Skyler Fennell (KD0WHB
+#    Wi-fi card selection and loop scan contributed by Skyler Fennell (W0SKY)
 #    https://www.youtube.com/channel/UCyQzGw5fvymeCcafN-J7krQ
-
+#
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
 #    the Free Software Foundation, either version 3 of the License, or
 #    (at your option) any later version.
-
+#
 #    This program is distributed in the hope that it will be useful,
 #    but WITHOUT ANY WARRANTY; without even the implied warranty of
 #    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #    GNU General Public License for more details.
-
+#
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
+#
 # Script Start
 echo "Welcome to Wi-Fi setup."
-sleep 0.5s
+sleep 0.5
 country=$( cat /etc/wpa_supplicant/wpa_supplicant.conf | grep "country=" | sed 's/country\=//' )
 read -e -p "$( echo -e "Your country is currently set to: $country\n Do you want to change it? [Y/N]" )" changeCountry
 if [[ "$changeCountry" = "y" ]] || [[ "$changeCountry" = "Y" ]]; then
@@ -32,36 +32,37 @@ if [[ "$changeCountry" = "y" ]] || [[ "$changeCountry" = "Y" ]]; then
 else
   echo "Country not changed"
 fi
-sleep 0.5s
+sleep 0.5
 echo "Please enter the Wi-Fi card name from the list below:"
-ifconfig | grep wlan
+ip a|grep 'wlan'|sed 's/^..//;s/:.*//;s/inet.*//'
 read -e -p "[wlan0] : " wificard
-if [ "$wificard" = "" ]; then
+cardnum=$(ip a|grep "${wificard}"|sed 's/:.*//;s/inet.*//')
+if [ "${wificard}" = "" ]; then
   wificard=wlan0
 fi
-sleep 0.5s
+sleep 0.5
 scan=1
-while [ "$scan" == "1" ]; do
+while [ "${scan}" == "1" ]; do
   echo "Scanning for networks..."
   echo "___________________________________"
-  sleep 0.5s
-  iwlist $wificard scan | grep "ESSID" | sed 's/ESSID://g;s/"//g;s/^ *//;s/ *$//'
-  sleep 0.5s
+  sleep 0.5
+  iwlist ${wificard} scan | grep 'ESSID' | sed 's/ESSID://g;s/"//g;s/^ *//;s/ *$//'
+  sleep 0.5
   echo "Scan complete"
-  sleep 0.5s
+  sleep 0.5
   read -e -p "Do you want to scan again? [y/N]" YN
-  if [[ "$YN" = "y" ]] || [[ "$YN" = "Y" ]];  then
+  if [[ "${YN}" = "y" ]] || [[ "${YN}" = "Y}" ]];  then
    scan=1
   else
    scan=0
      fi
 done
-sleep 0.5s
+sleep 0.5
 read -e -p "Please enter the name of the network you want to connect to: " networkName
-echo "You entered: $networkName"
+echo "You entered: ${networkName}"
 read -e -p "Please enter the password for the network: " networkPass
 echo "Password accepted"
-sleep 0.5s
+sleep 0.5
 echo "Setting up connection..."
 echo "network={
  ssid=\"$networkName\"
@@ -70,24 +71,24 @@ echo "network={
 echo "Done"
 sleep 0.5
 echo "Activating connection; Please wait..."
-ifdown $wificard &>/dev/null
-sleep 0.5s
-ifup $wificard &>/dev/null
-sleep 10s
-if [[ $(ifconfig ${wificard} | grep -c "inet addr:") = "1" ]]; then
-  echo "***Connection Active***"
-  sleep 0.5s
-  echo "displaying connection information"
-  ifconfig $wificard | grep "inet addr.*"
-  ifconfig $wificard | grep "inet6 addr.*"
+ifdown ${wificard} &>/dev/null
+sleep 0.5
+ifup ${wificard} &>/dev/null
+sleep 10
+if [ "$(ip a|grep "${wificard}"|grep -ic 'inet')" = "1" ]; then
+    echo "***Connection Active***"
+    sleep 0.5s
+    echo "displaying connection information"
+    sleep 0.5s
+    (ip a|grep "${wificard}"|sed 's/^..//';ip a|grep "${cardnum}:"|grep 'inet6')
 else
-  echo "***Connection Failed***" >&2
-  echo "See https://jlappliedtechnologies.com/raslink if you need assistance." >&2
-  exit 1
+    echo "***Connection Failed***" >&2
+    echo "See <https://jlappliedtechnologies.com/raslink/> if you need assistance." >&2
+    exit 1
 fi
 sleep 0.5s
 echo "If you want to setup another connection, run wifi-setup again."
 echo "To remove a network, edit /etc/wpa_supplicant/wpa_supplicant.conf."
-echo "See https://jlappliedtechnologies.com/raslink if you need assistance." 
+echo "See <https://jlappliedtechnologies.com/raslink/> if you need assistance." 
 echo "Exiting"
 exit 0

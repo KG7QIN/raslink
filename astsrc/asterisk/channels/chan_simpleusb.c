@@ -1,21 +1,61 @@
-/* #define	NEW_ASTERISK */
-/*
- * Asterisk -- An open source telephony toolkit.
- * * Copyright (C) 1999 - 2005, Digium, Inc.
- * Copyright (C) 2007 - 2008, Jim Dixon
+/* SimpleUSB Radio Channel Driver for app_rpt/Asterisk
  *
- * Jim Dixon, WB6NIL <jim@lambdatel.com>
- * Based upon work by Mark Spencer <markster@digium.com> and Luigi Rizzo
+ * chan_simpleusb.c - Version 200511
  *
- * See http://www.asterisk.org for more information about
- * the Asterisk project. Please do not directly contact
- * any of the maintainers of this project for assistance;
- * the project provides a web site, mailing lists and IRC
+ * Copyright (C) 2002-2017, Jim Dixon, WB6NIL and AllStarLink, Inc. and contributors
+ * Copyright (C) 2018 Steve Zingman, N4IRS; Michael Zingman, N4IRR; AllStarLink, Inc. and contributors
+ * Copyright (C) 2018-2020 Stacy Olivas, KG7QIN and contributors 
+ *
+ * All Rights Reserved
+ * Licensed under the GNU GPL v2 (see below)
+ * 
+ * Refer to AUTHORS file for listing of authors/contributors to app_rpt.c and other related AllStar programs
+ * as well as individual copyrights by authors/contributors.  Unless specified or otherwise assigned, all authors and
+ * contributors retain their individual copyrights and license them freely for use under the GNU GPL v2.
+ *
+ * Notice:  Unless specifically stated in the header of this file, all changes
+ *          are licensed under the GNU GPL v2 and cannot be relicensed. 
+ *
+ * The AllStar software is the creation of Jim Dixon, WB6NIL with serious contributions by Steve RoDgers, WA6ZFT
+ * 
+ * This software is based upon and dependent upon the Asterisk - An open source telephone toolkit
+ * Copyright (C) 1999 - 2005, Digium, Inc.
+ *
+ * See http://www.asterisk.org for more information about the Asterisk project. Please do not directly contact
+ * any of the maintainers of this project for assistance; the project provides a web site, mailing lists and IRC
  * channels for your use.
  *
- * This program is free software, distributed under the terms of
- * the GNU General Public License Version 2. See the LICENSE file
-  * at the top of the source tree.
+ * License:
+ * --------
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
+ *
+ * ------------------------------------------------------------------------
+ * This program is free software, distributed under the terms of the GNU General Public License Version 2. See the LICENSE file
+ * at the top of the source tree for more information.
+ *
+ *
+ * Changes:
+ * --------
+ * 02/04/19 - Stacy Olivas, KG7QIN <kg7qin@arrl.net>
+ * Fixed audio support for CM119B chipset
+ * (Based upon work by Steve Zingman, N4IRS)
+ *
+ * 08/29/19 - Stacy Olivas, KG7QIN <kg7qni@arrl.net>
+ * Added in code to force usb initalization and device chipset type
+ * override.
+ *
  */
 
 /*! \file
@@ -28,13 +68,21 @@
  */
 
 /*** MODULEINFO
-        <defaultenabled>yes</defaultenabled> 	 	 
+        <defaultenabled>yes</defaultenabled>
  ***/
+
+/* #define      NEW_ASTERISK */
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 535 $")
+/*
+ * Please change this revision number when you make a edit
+ * use the simple format YYMMDD
+*/
 
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 20511 $")
+
+#include <pthread.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <math.h>
@@ -54,7 +102,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 535 $")
 #include <linux/parport.h>
 #include <linux/version.h>
 
-#include "pocsag.c"
+#include "../allstar/pocsag.c"
 
 #define DEBUG_CAPTURES	 		1
 
@@ -71,6 +119,9 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 535 $")
 #define	MIXER_PARAM_SPKR_PLAYBACK_VOL "Speaker Playback Volume"
 #define	MIXER_PARAM_SPKR_PLAYBACK_SW_NEW "Headphone Playback Switch"
 #define	MIXER_PARAM_SPKR_PLAYBACK_VOL_NEW "Headphone Playback Volume"
+
+#define	TXT_OVERRIDE "Device override:"
+#define TXT_HIDTHREAD1  "chan_simpleusb() hidthread:"
 
 #define	DELIMCHR ','
 #define	QUOTECHR 34
@@ -128,10 +179,12 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 535 $")
 
 #define C108_VENDOR_ID		0x0d8c
 #define C108_PRODUCT_ID  	0x000c
+#define C108B_PRODUCT_ID  	0x0012
 #define C108AH_PRODUCT_ID  	0x013c
 #define N1KDO_PRODUCT_ID  	0x6a00
 #define C119_PRODUCT_ID  	0x0008
 #define C119A_PRODUCT_ID  	0x013a
+#define C119B_PRODUCT_ID        0x0013
 #define C108_HID_INTERFACE	3
 
 #define HID_REPORT_GET		0x01
@@ -159,6 +212,11 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 535 $")
 #define	NTAPS_PL 6
 
 #define	DEFAULT_ECHO_MAX 1000  /* 20 secs of echo buffer, max */
+
+#define HIDTHREAD_PRI		70
+#define SOUNDTHREAD_PRI 	99
+#define PULSERTHREAD_PRI	30
+#define SCHED_POLICY		SCHED_FIFO
 
 #define	PP_MASK 0xbffc
 #define	PP_PORT "/dev/parport0"
@@ -210,13 +268,17 @@ START_CONFIG
 
 	; invertptt = 0
 
-        ; duplex = 1		; duplex mode    
+        ; duplex = 1		; duplex mode
 
 	; duplex3 = 0		; duplex 3 gain setting (0 to disable)
 
 	; rxondelay = 0		  ; number of 20ms intervals to hold off receiver turn-on indication
 
         ; eeprom = no		; no eeprom installed
+
+	; ctype = 0		; CM119/119A and CM119B device selection for audio (0=auto; 1=C108; 2=C108AH; 3=N1KDO; 4=C119/C119A; 5=C119B)
+
+	; forceinit = 0		; Forces a USB device to attempt initalization (0=off, 1=on) Must be used with ctype!
 
     ;------------------------------ JITTER BUFFER CONFIGURATION --------------------------
     ; jbenable = yes              ; Enables the use of a jitterbuffer on the receiving side of an
@@ -369,6 +431,8 @@ static 	char	stoppulser;
 static	char	hasout;
 pthread_t pulserid;
 
+static int force_dev_init = 0;
+
 static int simpleusb_debug;
 
 enum {CD_IGNORE,CD_HID,CD_HID_INVERT,CD_PP,CD_PP_INVERT};
@@ -390,7 +454,7 @@ struct sound {
 	int samplen;
 	int silencelen;
 	int repeat;
-};
+} __attribute__((aligned));
 
 #ifndef	NEW_ASTERISK
 
@@ -406,10 +470,10 @@ static struct sound sounds[] = {
 #endif
 
 struct usbecho {
-struct qelem *q_forw;
-struct qelem *q_prev;
-short data[FRAME_SIZE];
-} ;
+	struct qelem *q_forw;
+	struct qelem *q_prev;
+	short data[FRAME_SIZE];
+} __attribute__((aligned));
 
 /*
  * descriptor for one of our channels.
@@ -437,7 +501,7 @@ struct chan_simpleusb_pvt {
 	int nosound;				/* set to block audio from the PBX */
 #endif
 
-	int devtype;				/* actual type of device */
+	long devtype;				/* actual type of device */
 	int pttkick[2];
 	int total_blocks;			/* total blocks in the output device */
 	int sounddev;
@@ -566,7 +630,7 @@ struct chan_simpleusb_pvt {
 	struct qelem echoq;
 	int echomax;
 
-	int    	hdwtype;
+	int    		hdwtype;
 	int		hid_gpio_ctl;		
 	int		hid_gpio_ctl_loc;	
 	int		hid_io_cor; 		
@@ -583,6 +647,7 @@ struct chan_simpleusb_pvt {
 	int		hid_gpio_pulsetimer[32];
 	int32_t		hid_gpio_pulsemask;
 	int32_t		hid_gpio_lastmask;
+	int		type_override;
 
 	int8_t		last_pp_in;
 	char		had_pp_in;
@@ -593,7 +658,7 @@ struct chan_simpleusb_pvt {
 	    unsigned rxcapraw:1;
 	    unsigned txcapraw:1;
 	    unsigned measure_enabled:1;
-	}b;
+	}__attribute__((aligned)) b;
 	unsigned short eeprom[EEPROM_PHYSICAL_LEN];
 	char eepromctl;
 	ast_mutex_t eepromlock;
@@ -616,7 +681,7 @@ struct chan_simpleusb_pvt {
 	char *gpios[32];
 	char *pps[32];
 	ast_mutex_t usblock;
-};
+} __attribute__((aligned));
 
 static struct chan_simpleusb_pvt simpleusb_default = {
 #ifndef	NEW_ASTERISK
@@ -637,6 +702,7 @@ static struct chan_simpleusb_pvt simpleusb_default = {
 	.usedtmf = 1,
 	.rxondelay = 0,
 	.pager = PAGER_NONE,
+	.type_override = 0,
 };
 
 /*	DECLARE FUNCTION PROTOTYPES	*/
@@ -663,7 +729,7 @@ static int simpleusb_indicate(struct ast_channel *chan, int cond, const void *da
 static int simpleusb_fixup(struct ast_channel *oldchan, struct ast_channel *newchan);
 static int simpleusb_setoption(struct ast_channel *chan, int option, void *data, int datalen);
 
-static char tdesc[] = "Simple USB (CM108) Radio Channel Driver";
+static char tdesc[] = "Simple USB Radio Channel Driver (rev: 200501)";
 
 static const struct ast_channel_tech simpleusb_tech = {
 	.type = "SimpleUSB",
@@ -687,7 +753,7 @@ int	ppinshift[] = {0,0,0,0,0,0,0,0,0,0,6,7,5,4,0,3};
 
 /* FIR Low pass filter, 2900 Hz passband with 0.5 db ripple, 6300 Hz stopband at 60db */
 
-static short lpass(short input,short *z)
+inline static short lpass(short input,short *z)
 {
     int i;
     int accum;
@@ -714,7 +780,7 @@ static short lpass(short input,short *z)
 
 #define GAIN1   1.745882764e+00
 
-static int16_t hpass6(int16_t input,float *xv,float *yv)
+inline static int16_t hpass6(int16_t input,float *xv,float *yv)
 {
         xv[0] = xv[1]; xv[1] = xv[2]; xv[2] = xv[3]; xv[3] = xv[4]; xv[4] = xv[5]; xv[5] = xv[6];
         xv[6] = ((float)input) / GAIN1;
@@ -729,7 +795,7 @@ static int16_t hpass6(int16_t input,float *xv,float *yv)
 
 
 /* Perform standard 6db/octave de-emphasis */
-static int16_t deemph(int16_t input,int32_t *state)
+inline static int16_t deemph(int16_t input,int32_t *state)
 {
 
 int16_t coeff00 = 6878;
@@ -745,7 +811,7 @@ int32_t accum; /* 32 bit accumulator */
 }
 
 /* Perform standard 6db/octave pre-emphasis */
-static int16_t preemph(int16_t input,int32_t *state)
+inline static int16_t preemph(int16_t input,int32_t *state)
 {
 
 int16_t coeff00 = 17610;
@@ -765,7 +831,7 @@ int32_t y,temp0,temp1;
 
 /* IIR 3 pole High pass filter, 300 Hz corner with 0.5 db ripple */
 
-static int16_t hpass(int16_t input,float *xv,float *yv)
+inline static int16_t hpass(int16_t input,float *xv,float *yv)
 {
 #define GAIN   1.280673652e+00
 
@@ -782,21 +848,32 @@ static int16_t hpass(int16_t input,float *xv,float *yv)
  *
  * wrapper for lround(x)
  */
-long lround(double x)
+inline long lround(double x)
 {
     return (long) ((x - ((long)x) >= 0.5f) ? (((long)x) + 1) : ((long)x));
 }
 
-static int make_spkr_playback_value(struct chan_simpleusb_pvt *o,int val)
+inline static int make_spkr_playback_value(struct chan_simpleusb_pvt *o,int val)
 {
 int	v,rv;
 
-	v = (val * o->spkrmax) / 1000;
-	/* if just the old one, do it the old way */
-	if (o->devtype == C108_PRODUCT_ID) return v;
-	rv = (o->spkrmax + lround(20.0 * log10((float)(v + 1) / (float)(o->spkrmax + 1)) / 0.25));
-	if (rv < 0) rv = 0;
-	return rv;	
+	switch (o->devtype)
+	{
+		case C108_PRODUCT_ID:
+			v = (val * o->spkrmax) / 1000;
+			return v;
+		case C119B_PRODUCT_ID:
+			v = (val * o->spkrmax) / 750;
+			rv = (o->spkrmax + lround(10.0 * log10((float)(v + 1) / (float)(o->spkrmax + 1)) / 0.25));
+			if (rv < 0) rv = 0;
+			return rv;
+		default:
+			v = (val * o->spkrmax) / 1000;
+			rv = (o->spkrmax + lround(20.0 * log10((float)(v + 1) / (float)(o->spkrmax + 1)) / 0.25));
+			if (rv < 0) rv = 0;
+			return rv;
+
+	}
 }
 
 /* Call with:  devnum: alsa major device number, param: ascii Formal
@@ -849,7 +926,7 @@ if only 1 value. Values: 0-99 (percent) or 0-1 for baboon.
 
 Note: must add -lasound to end of linkage */
 
-static int setamixer(int devnum,char *param, int v1, int v2)
+inline static int setamixer(int devnum,char *param, int v1, int v2)
 {
 int	type;
 char	str[100];
@@ -993,13 +1070,15 @@ static struct usb_device *hid_device_init(char *desired_device)
         for (dev = usb_bus->devices;
              dev;
              dev = dev->next) {
-            if ((dev->descriptor.idVendor
+            if (( (dev->descriptor.idVendor
                   == C108_VENDOR_ID) &&
 		(((dev->descriptor.idProduct & 0xfffc) == C108_PRODUCT_ID) ||
+		(dev->descriptor.idProduct == C108B_PRODUCT_ID) ||
 		(dev->descriptor.idProduct == C108AH_PRODUCT_ID) ||
 		(dev->descriptor.idProduct == C119A_PRODUCT_ID) ||
+		(dev->descriptor.idProduct == C119B_PRODUCT_ID) ||
 		((dev->descriptor.idProduct & 0xff00)  == N1KDO_PRODUCT_ID) ||
-		(dev->descriptor.idProduct == C119_PRODUCT_ID)))
+		(dev->descriptor.idProduct == C119_PRODUCT_ID))) || force_dev_init == 1)
 		{
                         sprintf(devstr,"%s/%s", usb_bus->dirname,dev->filename);
 			for(i = 0; i < 32; i++)
@@ -1077,13 +1156,15 @@ static int hid_device_mklist(void)
         for (dev = usb_bus->devices;
              dev;
              dev = dev->next) {
-            if ((dev->descriptor.idVendor
+            if (( (dev->descriptor.idVendor
                   == C108_VENDOR_ID) &&
 		(((dev->descriptor.idProduct & 0xfffc) == C108_PRODUCT_ID) ||
+		(dev->descriptor.idProduct == C108B_PRODUCT_ID) ||
 		(dev->descriptor.idProduct == C108AH_PRODUCT_ID) ||
 		(dev->descriptor.idProduct == C119A_PRODUCT_ID) ||
+		(dev->descriptor.idProduct == C119B_PRODUCT_ID) ||
 		((dev->descriptor.idProduct & 0xff00)  == N1KDO_PRODUCT_ID) ||
-		(dev->descriptor.idProduct == C119_PRODUCT_ID)))
+		(dev->descriptor.idProduct == C119_PRODUCT_ID))) || force_dev_init == 1 )
 		{
                         sprintf(devstr,"%s/%s", usb_bus->dirname,dev->filename);
 			for(i = 0;i < 32; i++)
@@ -1378,6 +1459,15 @@ static void *pulserthread(void *arg)
 {
 struct	timeval now,then;
 int	i,j,k;
+struct sched_param      pulser_sched;
+
+        pthread_t pusler_selfid = pthread_self();
+        pulser_sched.sched_priority=PULSERTHREAD_PRI;
+        if(pthread_setschedparam(pusler_selfid, SCHED_POLICY, &pulser_sched) != 0)
+        {
+		ast_log(LOG_ERROR,"Unable to change thread priority\n");
+	}
+
 
 	if (haspp == 2) ioperm(pbase,2,1);
 	stoppulser = 0;
@@ -1419,7 +1509,7 @@ int	i,j,k;
 
 /*
 */
-static void *hidthread(void *arg)
+inline static void *hidthread(void *arg)
 {
 	unsigned char buf[4],bufsave[4],keyed,ctcssed,txreq;
 	char fname[200], *s, isn1kdo, lasttxtmp;
@@ -1431,6 +1521,14 @@ static void *hidthread(void *arg)
 	struct ast_config *cfg1;
 	struct ast_variable *v;
 	fd_set rfds;
+	struct sched_param      hidthread_sched;
+
+	pthread_t hid_selfid = pthread_self();
+	hidthread_sched.sched_priority=HIDTHREAD_PRI;
+	if(pthread_setschedparam(hid_selfid, SCHED_POLICY, &hidthread_sched) != 0)
+	{
+		ast_log(LOG_ERROR,"Unable to change thread priority\n");
+	}
 
         usb_dev = NULL;
         usb_handle = NULL;
@@ -1454,9 +1552,9 @@ static void *hidthread(void *arg)
 			if (i < 0) continue;
 			usb_dev = hid_device_init(s);
 			if (usb_dev == NULL) continue;
-			if ((usb_dev->descriptor.idProduct & 0xff00) != N1KDO_PRODUCT_ID) continue;
+			if ((usb_dev->descriptor.idProduct & 0xff00) != N1KDO_PRODUCT_ID && o->type_override != 3) continue;
 			if (o->index != (usb_dev->descriptor.idProduct & 0xf)) continue;
-			ast_log(LOG_NOTICE,"N1KDO port %d, USB device %s usbradio channel %s\n",
+			ast_log(LOG_NOTICE,"N1KDO port %d, USB device %s simpleusb channel %s\n",
 				usb_dev->descriptor.idProduct & 0xf,s,o->name);
 			strcpy(o->devstr,s);
 			isn1kdo = 1;
@@ -1471,7 +1569,7 @@ static void *hidthread(void *arg)
 				if (i < 0) continue;
 				usb_dev = hid_device_init(s);
 				if (usb_dev == NULL) continue;
-				if ((usb_dev->descriptor.idProduct & 0xff00) != N1KDO_PRODUCT_ID) continue;
+				if ((usb_dev->descriptor.idProduct & 0xff00) != N1KDO_PRODUCT_ID && o->type_override != 3) continue;
 				if (!strcmp(s,o->devstr))
 				{
 					strcpy(o->devstr,"XXX");
@@ -1593,10 +1691,40 @@ static void *hidthread(void *arg)
 		    ast_log(LOG_ERROR,"Not able to create pipe\n");
 			pthread_exit(NULL);
 		}
-		if ((usb_dev->descriptor.idProduct & 0xfffc) == C108_PRODUCT_ID)
-			o->devtype = C108_PRODUCT_ID;
-		else
-			o->devtype = usb_dev->descriptor.idProduct;
+		switch 	(o->type_override)
+		{
+			case 1:
+				o->devtype = C108_PRODUCT_ID;
+				ast_verbose(VERBOSE_PREFIX_2 "%s C108 chipset\n", TXT_OVERRIDE);
+				break;
+			case 2:
+				o->devtype = C108AH_PRODUCT_ID;
+				ast_verbose(VERBOSE_PREFIX_2 "%s C108AH chipset\n", TXT_OVERRIDE);
+				break;
+			case 3:
+                                o->devtype = N1KDO_PRODUCT_ID;
+				ast_verbose(VERBOSE_PREFIX_2 "%s N1KDO chipset\n", TXT_OVERRIDE);
+				break;
+			case 4:
+				o->devtype = C119_PRODUCT_ID;
+				ast_verbose(VERBOSE_PREFIX_2 "%s C119/C119A chipset\n", TXT_OVERRIDE);
+				break;
+			case 5:
+				o->devtype = C119B_PRODUCT_ID;
+				ast_verbose(VERBOSE_PREFIX_2 "%s C119B chipset\n", TXT_OVERRIDE);
+				break;
+			default:
+				if (force_dev_init == 1)
+				{
+					ast_log(LOG_ERROR, ">>> Force initialization configured but ctype not defined <<<\n");
+					pthread_exit(NULL);
+				}
+				if ((usb_dev->descriptor.idProduct & 0xfffc) == C108_PRODUCT_ID)
+					o->devtype = C108_PRODUCT_ID;
+				else
+					o->devtype = usb_dev->descriptor.idProduct;
+		}
+
 		traceusb1(("hidthread: Starting normally on %s!!\n",o->name));
                 if (option_verbose > 1)
                        ast_verbose(VERBOSE_PREFIX_2 "Set device %s to %s\n",o->devstr,o->name);
@@ -1694,14 +1822,14 @@ static void *hidthread(void *arg)
 			keyed = !(buf[o->hid_io_cor_loc] & o->hid_io_cor);
 			if (keyed != o->rxhidsq)
 			{
-				if(o->debuglevel)printf("chan_simpleusb() hidthread: update rxhidsq = %d\n",keyed);
+				if(o->debuglevel) ast_verbose(VERBOSE_PREFIX_2 "%s update rxhidsq = %d\n",TXT_HIDTHREAD1,keyed);
 				o->rxhidsq = keyed;
 			}
 			ctcssed = !(buf[o->hid_io_ctcss_loc] & 
 				o->hid_io_ctcss);
 			if (ctcssed != o->rxhidctcss)
 			{
-				if(o->debuglevel)printf("chan_simpleusb() hidthread: update rxhidctcss = %d\n",ctcssed);
+				if(o->debuglevel) ast_verbose(VERBOSE_PREFIX_2 "%s update rxhidctcss = %d\n",TXT_HIDTHREAD1,ctcssed);
 				o->rxhidctcss = ctcssed;
 			}
 			ast_mutex_lock(&o->txqlock);
@@ -1714,7 +1842,7 @@ static void *hidthread(void *arg)
 				if (o->invertptt) buf[o->hid_gpio_loc] = 0;
 				buf[o->hid_gpio_ctl_loc] = o->hid_gpio_ctl;
 				hid_set_outputs(usb_handle,buf);
-				if(o->debuglevel)printf("chan_simpleusb() hidthread: update PTT = %d\n",txreq);
+				if(o->debuglevel) ast_verbose(VERBOSE_PREFIX_2 "%s update PTT = %d\n",TXT_HIDTHREAD1,txreq);
 			}
 			else if ((!txreq) && o->lasttx)
 			{
@@ -1722,7 +1850,7 @@ static void *hidthread(void *arg)
 				if (o->invertptt) buf[o->hid_gpio_loc] = o->hid_io_ptt;
 				buf[o->hid_gpio_ctl_loc] = o->hid_gpio_ctl;
 				hid_set_outputs(usb_handle,buf);
-				if(o->debuglevel)printf("chan_simpleusb() hidthread: update PTT = %d\n",txreq);
+				if(o->debuglevel) ast_verbose(VERBOSE_PREFIX_2 "%s update PTT = %d\n",TXT_HIDTHREAD1,txreq);
 			}
 			lasttxtmp = o->lasttx;
 			o->lasttx = txreq;
@@ -1767,7 +1895,7 @@ static void *hidthread(void *arg)
 						fr.samples = 0;
 						fr.frametype = AST_FRAME_TEXT;
 						fr.subclass = 0;
-						fr.src = "chan_usbradio";
+						fr.src = "chan_simpleusb";
 						fr.offset = 0;
 						fr.mallocd=0;
 						fr.delivery.tv_sec = 0;
@@ -1812,7 +1940,7 @@ static void *hidthread(void *arg)
 						fr.samples = 0;
 						fr.frametype = AST_FRAME_TEXT;
 						fr.subclass = 0;
-						fr.src = "chan_usbradio";
+						fr.src = "chan_simpleusb";
 						fr.offset = 0;
 						fr.mallocd=0;
 						fr.delivery.tv_sec = 0;
@@ -1832,7 +1960,7 @@ static void *hidthread(void *arg)
 					j = k & (1 << ppinshift[i]); /* set the bit accordingly */
 					if (j != o->rxppsq)
 					{
-						if(o->debuglevel)printf("chan_usbradio() hidthread: update rxppsq = %d\n",j);
+						if(o->debuglevel) ast_verbose(VERBOSE_PREFIX_2 "%s update rxppsq = %d\n",TXT_HIDTHREAD1,j);
 						o->rxppsq = j;
 					}
 				}
@@ -1882,7 +2010,7 @@ static void *hidthread(void *arg)
 			}
 			if (lasttxtmp != o->lasttx)
 			{
-				if(o->debuglevel) printf("hidthread: tx set to %d\n",o->lasttx);
+				if(o->debuglevel) ast_verbose(VERBOSE_PREFIX_2 "%s tx set to %d\n",TXT_HIDTHREAD1,o->lasttx);
 				o->hid_gpio_val &= ~o->hid_io_ptt;
 				ast_mutex_lock(&pp_lock);
 				if (k) pp_val &= ~k;
@@ -1909,7 +2037,7 @@ static void *hidthread(void *arg)
 				memcpy(bufsave,buf,sizeof(buf));
 				hid_set_outputs(usb_handle,buf);
 			}
-			ast_mutex_unlock(&o->usblock);
+//			ast_mutex_unlock(&o->usblock);
 		}
 		o->lasttx = 0;
 		buf[o->hid_gpio_loc] = 0;
@@ -1931,7 +2059,7 @@ static void *hidthread(void *arg)
 /*
  * Returns the number of blocks used in the audio output channel
  */
-static int used_blocks(struct chan_simpleusb_pvt *o)
+inline static int used_blocks(struct chan_simpleusb_pvt *o)
 {
 	struct audio_buf_info info;
 
@@ -1953,7 +2081,7 @@ static int used_blocks(struct chan_simpleusb_pvt *o)
 }
 
 /* Write an exactly FRAME_SIZE sized frame */
-static int soundcard_writeframe(struct chan_simpleusb_pvt *o, short *data)
+inline static int soundcard_writeframe(struct chan_simpleusb_pvt *o, short *data)
 {
 	int res;
 
@@ -1992,7 +2120,7 @@ static int soundcard_writeframe(struct chan_simpleusb_pvt *o, short *data)
  * in o->sampsent, which goes between 0 .. s->samplen+s->silencelen.
  * In case we fail to write a frame, don't update o->sampsent.
  */
-static void send_sound(struct chan_simpleusb_pvt *o)
+inline static void send_sound(struct chan_simpleusb_pvt *o)
 {
 	short myframe[FRAME_SIZE];
 	int ofs, l, start;
@@ -2041,10 +2169,19 @@ static void send_sound(struct chan_simpleusb_pvt *o)
 		o->sampsent = l_sampsent;	/* update status */
 }
 
-static void *sound_thread(void *arg)
+inline static void *sound_thread(void *arg)
 {
 	char ign[4096];
 	struct chan_simpleusb_pvt *o = (struct chan_simpleusb_pvt *) arg;
+	struct sched_param      soundthread_sched;
+	
+	pthread_t sound_selfid = pthread_self();
+        soundthread_sched.sched_priority=SOUNDTHREAD_PRI;
+        if(pthread_setschedparam(sound_selfid, SCHED_POLICY, &soundthread_sched) != 0)
+	{
+		ast_log(LOG_ERROR,"Unable to change thread priority\n");
+	}
+
 
 	/*
 	 * Just in case, kick the driver by trying to read from it.
@@ -2115,7 +2252,7 @@ static void *sound_thread(void *arg)
  * then open and initialize it in the desired mode,
  * trigger reads and writes so we can start using it.
  */
-static int setformat(struct chan_simpleusb_pvt *o, int mode)
+inline static int setformat(struct chan_simpleusb_pvt *o, int mode)
 {
 	int fmt, desired, res, fd;
 	char device[100];
@@ -2264,7 +2401,7 @@ static int simpleusb_text(struct ast_channel *c, const char *text)
 		cnt = sscanf(text,"%s %d",cmd,&i);
 		if (cnt < 2) return 0;
 		o->rxctcssoverride = !i;
-	        if(o->debuglevel)ast_log(LOG_NOTICE,"parse usbradio RXCTCSS cmd: %s\n",text);
+	        if(o->debuglevel)ast_log(LOG_NOTICE,"parse simpleusb RXCTCSS cmd: %s\n",text);
 		return 0;		
 	}
 
@@ -2434,10 +2571,18 @@ static void ring(struct chan_simpleusb_pvt *o, int x)
 static int simpleusb_call(struct ast_channel *c, char *dest, int timeout)
 {
 	struct chan_simpleusb_pvt *o = c->tech_pvt;
+	pthread_attr_t pta;
+	struct sched_param ptp;
+	ptp.sched_priority = HIDTHREAD_PRI;
 
+	pthread_attr_init(&pta);
+	pthread_attr_setinheritsched(&pta, PTHREAD_EXPLICIT_SCHED);
+	pthread_attr_setschedpolicy(&pta, SCHED_POLICY);
+	pthread_attr_setschedparam(&pta, &ptp);
+	pthread_attr_setscope(&pta, PTHREAD_SCOPE_SYSTEM);
 	o->stophid = 0;
 	time(&o->lasthidtime);
-	ast_pthread_create_background(&o->hidthread, NULL, hidthread, o);
+	ast_pthread_create_background(&o->hidthread, &pta, hidthread, o);
 	ast_setstate(c, AST_STATE_UP);
 	return 0;
 }
@@ -2488,7 +2633,7 @@ static int simpleusb_hangup(struct ast_channel *c)
 
 
 /* used for data coming from the network */
-static int simpleusb_write(struct ast_channel *c, struct ast_frame *f)
+inline static int simpleusb_write(struct ast_channel *c, struct ast_frame *f)
 {
 	struct chan_simpleusb_pvt *o = c->tech_pvt;
 	struct ast_frame *f1;
@@ -2543,7 +2688,7 @@ static int simpleusb_write(struct ast_channel *c, struct ast_frame *f)
 
 
 
-static struct ast_frame *simpleusb_read(struct ast_channel *c)
+inline static struct ast_frame *simpleusb_read(struct ast_channel *c)
 {
 	int res,cd,sd,src,i,n,ispager,doleft,doright; // Yes, like Dudley!!! :-)
 	struct chan_simpleusb_pvt *o = c->tech_pvt;
@@ -2962,7 +3107,7 @@ static struct ast_frame *simpleusb_read(struct ast_channel *c)
         return f;
 }
 
-static int simpleusb_fixup(struct ast_channel *oldchan, struct ast_channel *newchan)
+inline static int simpleusb_fixup(struct ast_channel *oldchan, struct ast_channel *newchan)
 {
 	struct chan_simpleusb_pvt *o = newchan->tech_pvt;
 	ast_log(LOG_WARNING,"simpleusb_fixup()\n");
@@ -3265,7 +3410,7 @@ struct chan_simpleusb_pvt *p = NULL,*o = find_desc(simpleusb_active);
 	return 0;
 }
 
-static int happy_mswait(int fd,int ms, int flag)
+inline static int happy_mswait(int fd,int ms, int flag)
 {
 int	i;
 
@@ -3876,7 +4021,7 @@ static void tune_write(struct chan_simpleusb_pvt *o)
 	}
 }
 //
-static void mixer_write(struct chan_simpleusb_pvt *o)
+inline static void mixer_write(struct chan_simpleusb_pvt *o)
 {
 	int x;
 	float f,f1;
@@ -3896,11 +4041,21 @@ static void mixer_write(struct chan_simpleusb_pvt *o)
 	setamixer(o->devicenum,(o->newname) ? MIXER_PARAM_SPKR_PLAYBACK_VOL_NEW : MIXER_PARAM_SPKR_PLAYBACK_VOL,
 		make_spkr_playback_value(o,o->txmixaset),
 		make_spkr_playback_value(o,o->txmixbset));
-	x =  o->rxmixerset * o->micmax / 1000;
+	switch (o->devtype)
+	{
+		case C119B_PRODUCT_ID:
+			x =  o->rxmixerset * o->micmax / 870;
+			/* get interval step size */
+			f = 870.0 / (float) o->micmax;
+			o->rxboostset = 1;
+			break;
+		default:
+			x =  o->rxmixerset * o->micmax / 1000;
+			/* get interval step size */
+			f = 1000.0 / (float) o->micmax;
+	}
 	setamixer(o->devicenum,MIXER_PARAM_MIC_CAPTURE_VOL,x,0);
-	/* get interval step size */
-	f = 1000.0 / (float) o->micmax;
-	o->rxvoiceadj = 1.0 + (modff(((float) o->rxmixerset) / f,&f1) * .187962);
+	o->rxvoiceadj = 1.0 + (modff(((float) o->rxmixerset) / f,&f1) * .187962);	
 	setamixer(o->devicenum,MIXER_PARAM_MIC_BOOST,o->rxboostset,0);
 	setamixer(o->devicenum,MIXER_PARAM_MIC_CAPTURE_SW,1,0);
 }
@@ -3976,6 +4131,8 @@ static struct chan_simpleusb_pvt *store_config(struct ast_config *cfg, char *ctg
  			M_BOOL("deemphasis",o->deemphasis)
  			M_BOOL("preemphasis",o->preemphasis)
  			M_UINT("duplex3",o->duplex3)
+			M_UINT("ctype", o->type_override);
+			M_UINT("forceinit", force_dev_init);
 			M_END(;
 			);
 			for(i = 0; i < 32; i++)
@@ -4067,7 +4224,17 @@ static struct chan_simpleusb_pvt *store_config(struct ast_config *cfg, char *ctg
 		goto error;
 	}
 
-	ast_pthread_create_background(&o->sthread, NULL, sound_thread, o);
+        pthread_attr_t pta;
+        struct sched_param ptp;
+	ptp.sched_priority = SOUNDTHREAD_PRI;
+
+        pthread_attr_init(&pta);
+        pthread_attr_setinheritsched(&pta, PTHREAD_EXPLICIT_SCHED);
+        pthread_attr_setschedpolicy(&pta, SCHED_POLICY);
+	pthread_attr_setscope(&pta, PTHREAD_SCOPE_SYSTEM);
+        pthread_attr_setschedparam(&pta, &ptp);
+
+	ast_pthread_create_background(&o->sthread, &pta, sound_thread, o);
 #endif
 
 	/* link into list of devices */
@@ -4292,8 +4459,17 @@ static int load_module(void)
 	}
 
 	ast_cli_register_multiple(cli_simpleusb, sizeof(cli_simpleusb) / sizeof(struct ast_cli_entry));
+        pthread_attr_t pta;
+        struct sched_param ptp;
+	ptp.sched_priority = PULSERTHREAD_PRI;
 
-	if (haspp && hasout) ast_pthread_create_background(&pulserid, NULL, pulserthread, NULL);
+        pthread_attr_init(&pta);
+        pthread_attr_setinheritsched(&pta, PTHREAD_EXPLICIT_SCHED);
+        pthread_attr_setschedpolicy(&pta, SCHED_POLICY);
+	pthread_attr_setscope(&pta, PTHREAD_SCOPE_SYSTEM);
+        pthread_attr_setschedparam(&pta, &ptp);
+
+	if (haspp && hasout) ast_pthread_create_background(&pulserid, &pta, pulserthread, NULL);
 
 	return AST_MODULE_LOAD_SUCCESS;
 }
